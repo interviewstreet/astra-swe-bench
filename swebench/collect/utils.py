@@ -75,17 +75,19 @@ class Repo:
                 logger.info(f"[{self.owner}/{self.name}] Resource not found {kwargs}")
                 return None
 
-    def extract_resolved_issues(self, pull: dict) -> list[str]:
+    def extract_resolved_issues(self, repo_name: str, pull: dict) -> list[str]:
         """
         Extract list of issues referenced by a PR
 
         Args:
+            repo (Repo): Repo object
             pull (dict): PR dictionary object from GitHub
         Return:
             resolved_issues (list): list of issue numbers referenced by PR
         """
         # Define 1. issue number regex pattern 2. comment regex pattern 3. keywords
         issues_pat = re.compile(r"(\w+)\s+\#(\d+)")
+        issues_pat1 = re.compile(rf"{repo_name}/issues/(\d+)")
         comments_pat = re.compile(r"(?s)<!--.*?-->")
 
         # Construct text to search over for issue numbers from PR body and commit messages
@@ -103,9 +105,18 @@ class Repo:
         references = dict(issues_pat.findall(text))
         resolved_issues = list()
         if references:
+            print(references)
             for word, issue_num in references.items():
                 if word.lower() in PR_KEYWORDS:
                     resolved_issues.append(issue_num)
+
+        # Second pattern: directly matches "{repo}/issues/22439"
+        references1 = issues_pat1.findall(text)
+        if references1:
+            print(references1)
+            resolved_issues.extend(references1)
+
+        resolved_issues = list(set(resolved_issues))
         return resolved_issues
 
     def get_all_loop(

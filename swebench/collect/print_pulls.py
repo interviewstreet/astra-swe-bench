@@ -41,7 +41,7 @@ def log_all_pulls(
 
     with open(output, "w") as file:
         for i_pull, pull in enumerate(repo.get_all_pulls()):
-            setattr(pull, "resolved_issues", repo.extract_resolved_issues(pull))
+            setattr(pull, "resolved_issues", repo.extract_resolved_issues(repo.name, pull))
             print(json.dumps(obj2dict(pull)), end="\n", flush=True, file=file)
             if max_pulls is not None and i_pull >= max_pulls:
                 break
