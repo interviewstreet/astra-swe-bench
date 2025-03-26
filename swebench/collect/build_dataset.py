@@ -4,7 +4,11 @@ import argparse
 import json
 import logging
 import os
-from typing import Optional
+from typing import Optional, Tuple
+import openai
+import re
+from together import Together
+from dotenv import load_dotenv
 
 from swebench.collect.utils import (
     extract_patches,
@@ -16,6 +20,111 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Initialize the OpenAI and Together AI client
+openai_client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+together_client = Together(api_key=os.getenv('TOGETHER_API_KEY'))
+
+def extract_sdlc(problem_statement: str, patch: str) -> str:
+    """
+    Extract SDLC phase using DeepSeek R1 model via Together AI.
+    """
+    prompt_template = """
+    You are a senior software developer.
+
+    Below you will find:
+    - A description of a GitHub issue.
+    - The corresponding code diff to address that issue.
+
+    Based solely on this information, please provide only the name of the Software Development Life Cycle (SDLC) phase that the task falls under.
+    Format your response exactly as follows:
+    SDLC: <name_of_sdlc_phase>
+
+    Inputs:
+    - GitHub Issue Description: {problem_statement}
+    - Code Diff: {patch}
+    """
+    prompt = prompt_template.format(
+        problem_statement=problem_statement, 
+        patch=patch
+    )    
+    messages = [{"role": "user", "content": prompt}]
+    response = together_client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1",
+        messages=messages,
+        temperature=0,
+    )
+    # Try accessing the text directly from the first choice.
+    try:
+        response_text = response.choices[0].text.strip()
+    except AttributeError:
+    # Fallback to using the Chat Completions style
+        response_text = response.choices[0].message.content.strip()
+    
+    sdlc_match = re.search(r'SDLC:\s*(.*?)(?:\n|$)', response_text)
+    return sdlc_match.group(1).strip() if sdlc_match else ""
+
+
+
+def extract_skills(problem_statement: str, patch: str) -> str:
+    """
+    Extract required skills using GPT-4.5-preview.
+    """
+    prompt_template = """
+    You are a senior software developer.
+
+    Below you will find:
+    - A description of a GitHub issue.
+    - The corresponding code diff to address that issue.
+
+    Based solely on this information, please provide only the names of the development skills required to fix the task.
+    Format your response exactly as follows:
+    Skills: <comma_separated_list_of_skills>
+
+    Inputs:
+    - GitHub Issue Description: {problem_statement}
+    - Code Diff: {patch}
+    """
+    
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt_template.format(
+            problem_statement=problem_statement,
+            patch=patch
+        )}
+    ]
+    
+    response = openai.ChatCompletion.create(
+        model="gpt-4.5-preview",
+        messages=messages,
+        temperature=0
+    )
+    
+    response_text = response.choices[0].message.content.strip()
+    skills_match = re.search(r'Skills:\s*(.*?)(?:\n|$)', response_text)
+    return skills_match.group(1).strip() if skills_match else ""
+
+
+def extract_sdlc_and_skills(problem_statement: str, patch: str) -> Tuple[str, str]:
+    """
+    Extract SDLC phase and required skills using different models.
+    """
+    try:
+        sdlc = extract_sdlc(problem_statement, patch)
+    except Exception as e:
+        logger.error(f"Error extracting SDLC: {str(e)}")
+        sdlc = ""
+        
+    try:
+        skills = extract_skills(problem_statement, patch)
+    except Exception as e:
+        logger.error(f"Error extracting skills: {str(e)}")
+        skills = ""
+        
+    return sdlc, skills
 
 
 def create_instance(repo: Repo, pull: dict) -> dict:
@@ -32,6 +141,9 @@ def create_instance(repo: Repo, pull: dict) -> dict:
     """
     patch, test_patch = extract_patches(pull, repo)
     problem_statement, hints = extract_problem_statement_and_hints(pull, repo)
+    # Extract SDLC phase and skills
+    sdlc_phase, required_skills = extract_sdlc_and_skills(problem_statement, patch)
+    
     return {
         "repo": repo.repo.full_name,
         "pull_number": pull["number"],
@@ -45,6 +157,8 @@ def create_instance(repo: Repo, pull: dict) -> dict:
         "problem_statement": problem_statement,
         "hints_text": hints,
         "created_at": pull["created_at"],
+        "sdlc_phase": sdlc_phase,
+        "required_skills": required_skills,
     }
 
 
