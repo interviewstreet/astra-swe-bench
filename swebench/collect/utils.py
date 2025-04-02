@@ -113,7 +113,6 @@ class Repo:
         # Second pattern: directly matches "{repo}/issues/22439"
         references1 = issues_pat1.findall(text)
         if references1:
-            print(references1)
             resolved_issues.extend(references1)
 
         resolved_issues = list(set(resolved_issues))

@@ -1,80 +1,96 @@
-import json
 import os
-import re
-import sys
-from ghapi.core import GhApi
-
-sys.path.append("../../harness")
+import json
+import requests
+import pandas as pd
+import datetime
+from bs4 import BeautifulSoup
 from swebench.versioning.utils import get_instances
 
-GITHUB_TOKEN = "<your GitHub token>"
-PATH_TASKS_GHOST = "<path to sqlfluff task instances>"
-PATH_TO_SAVE = "<path to save versioned task instances to>"
+PATH_TASKS_GHOST = "../../collect/ghost/ghost-tasks.jsonl.all"
+PATH_TO_SAVE = "../../collect/ghost"
+NODE_VERSION_URL = "https://ghost.org/docs/faq/node-versions/"
 
 # Get raw ghost dataset
 data_tasks = get_instances(PATH_TASKS_GHOST)
 
-# Get all GitHub releases
-api = GhApi(owner="TryGhost", repo="ghost", token=GITHUB_TOKEN)
 
-releases, i = [], 0
-while True:
-    temp = api.repos.list_releases("TryGhost", "Ghost", 100, page=i + 1)
-    releases.extend(temp)
-    print(len(releases))
-    if len(releases) > 300:
-        break
-    i += 1
-pairs = [(x["name"], x["published_at"]) for x in releases]
+# Get all versions from the Ghost Node Compatibility Matrix
+def get_node_compatibility_matrix(url):
+    # Download the page content
+    response = requests.get(url)
+    response.raise_for_status()  # raise an error for bad status codes
 
+    # Parse the HTML content
+    soup = BeautifulSoup(response.content, 'html.parser')
 
-def process(x):
-    """Extract version number from name"""
-    if x.startswith("Ghost "):
-        x = x[len("Ghost "):]
-    pattern = re.compile(r"(\d+)\.\d+\.\d+")
-    matches = pattern.findall(x)
-    if len(matches) > 0:
-        ver = matches[0]
-        return ver, None
+    # Find the table element with class 'gh-table' just after <h1> with id 'node-compatibility-matrix'
+    table = soup.find('h1', id='node-compatibility-matrix').find_next('table', class_='gh-table')
+    if not table:
+        raise ValueError("No table found after the specified header.")
 
-    return None, None
-
-
-# Collect version/date pairs
-version_date_map = {}
-for pair in pairs:
-    pair_rv = process(pair[0])
-    if pair_rv[0] is None:
-        continue
-    version = pair_rv[0]
-    if version.startswith("Bugfix Release "):
-        version = version[len("Bugfix Release "):]
-    date = pair[1] if pair_rv[1] is None else pair_rv[1]
-    if version in version_date_map:
-        version_date_map[version] = max(version_date_map[version], date)
+    # Extract table headers
+    # The headers are usually in the <thead> section
+    headers = []
+    thead = table.find('thead')
+    if thead:
+        header_row = thead.find('tr')
+        if header_row:
+            headers = [th.get_text(strip=True) for th in header_row.find_all('th')]
     else:
-        version_date_map[version] = date
+        # If no <thead>, try to get headers from the first row
+        header_row = table.find('tr')
+        if header_row:
+            headers = [th.get_text(strip=True) for th in header_row.find_all(['td', 'th'])]
+    if not headers:
+        raise ValueError("No headers found in the table.")
+    # Print headers for debugging
 
-print(version_date_map)
-# Get (date, version) pairs
-times = [(v, k) for k, v in version_date_map.items()]
-times = sorted(times, key=lambda x: x[0])[::-1]
+    # Extract table rows
+    rows = []
+    for tr in table.find_all('tr'):
+        cells = tr.find_all(['td', 'th'])
+        if cells:
+            row = [cell.get_text(strip=True) for cell in cells]
+            rows.append(row)
 
-# Iterate through data_tasks and assign versions
+    # Use the first row as header if available
+    if headers:
+        df = pd.DataFrame(rows[1:], columns=headers)
+    else:
+        # Fallback if no headers were found
+        df = pd.DataFrame(rows)
+
+    return df
+
+
+version_df = get_node_compatibility_matrix(NODE_VERSION_URL)
+
+
+def parse_version(version):
+    # Remove any leading ≥ sign
+    version = version.lstrip("≥")
+    return version
+
+
+version_df["Version"] = version_df["Version"].apply(parse_version)
+version_df["Released"] = pd.to_datetime(version_df["Released"], format="%Y/%m/%d")
+
+# Set the first version from the dataframe as the default version of the tasks
 for task in data_tasks:
-    created_at = task["created_at"].split("T")[0]
-    set_version = False
-    for t in times:
-        if t[0] < created_at:
-            task["version"] = t[1]
-            set_version = True
-            break
-    if not set_version:
-        task["version"] = None
+    task["version"] = version_df.iloc[0]["Version"]
 
-# Save sqlfluff versioned data to repository
-versioned_path = "ghost-task-instances-versioned.jsonl"
+for task in data_tasks:
+    created_at = datetime.datetime.strptime(task["created_at"].split("T")[0], "%Y-%m-%d")
+    for _, row in version_df.iterrows():
+        if row["Released"] <= created_at:
+            task['version'] = row["Version"]
+        else:
+            break
+# print task id and version
+# for task in data_tasks:
+#     print(f"Task ID: {task['instance_id']}, Created At: {task['created_at']} Version: {task['version']}")
+
+versioned_path = "ghost-task-instances-versioned.json"
 with open(
         os.path.join(PATH_TO_SAVE, versioned_path),
         "w",
